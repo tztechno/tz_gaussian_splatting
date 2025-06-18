@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive 3D Donut Gaussian Splatting</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.26.0/plotly.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .controls {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+        .control-group {
+            display: inline-block;
+            margin: 10px 20px;
+            vertical-align: top;
+        }
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .control-group input, .control-group select {
+            padding: 8px;
+            border: none;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            width: 120px;
+        }
+        .control-group input::placeholder {
+            color: rgba(255, 255, 255, 0.7);
+        }
+        .plot-container {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+        }
+        .stats {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        button {
+            background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            margin: 5px;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🍩 Interactive 3D Donut Gaussian Splatting</h1>
+        
+        <div class="stats">
+            <span id="pointCount">Points: 0</span> | 
+            <span id="renderTime">Render Time: 0ms</span>
+        </div>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label>Major Radius:</label>
+                <input type="range" id="majorRadius" min="1" max="4" step="0.1" value="2">
+                <span id="majorRadiusValue">2.0</span>
+            </div>
+            
+            <div class="control-group">
+                <label>Minor Radius:</label>
+                <input type="range" id="minorRadius" min="0.2" max="1.5" step="0.1" value="0.8">
+                <span id="minorRadiusValue">0.8</span>
+            </div>
+            
+            <div class="control-group">
+                <label>Resolution:</label>
+                <select id="resolution">
+                    <option value="15,12">Low (15×12)</option>
+                    <option value="25,20" selected>Medium (25×20)</option>
+                    <option value="35,28">High (35×28)</option>
+                    <option value="50,40">Ultra (50×40)</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Noise Level:</label>
+                <input type="range" id="noiseLevel" min="0" max="0.2" step="0.01" value="0.03">
+                <span id="noiseLevelValue">0.03</span>
+            </div>
+            
+            <div class="control-group">
+                <label>Point Size:</label>
+                <input type="range" id="pointSize" min="1" max="10" step="0.5" value="3">
+                <span id="pointSizeValue">3</span>
+            </div>
+            
+            <div class="control-group">
+                <label>Color Scheme:</label>
+                <select id="colorScheme">
+                    <option value="rainbow" selected>Rainbow</option>
+                    <option value="sunset">Sunset</option>
+                    <option value="ocean">Ocean</option>
+                    <option value="forest">Forest</option>
+                    <option value="galaxy">Galaxy</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <button onclick="generateDonut()">🔄 Regenerate</button>
+                <button onclick="animateRotation()">🔄 Animate</button>
+                <button onclick="randomizeParameters()">🎲 Random</button>
+            </div>
+        </div>
+        
+        <div class="plot-container">
+            <div id="donutPlot" style="width: 100%; height: 600px;"></div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let donutData = null;
+        let animationId = null;
+        let currentAngle = 0;
+
+        // HSV to RGB conversion
+        function hsvToRgb(h, s, v) {
+            h = h % 1.0;
+            const c = v * s;
+            const x = c * (1 - Math.abs((h * 6) % 2 - 1));
+            const m = v - c;
+            
+            let r, g, b;
+            if (h < 1/6) {
+                [r, g, b] = [c, x, 0];
+            } else if (h < 2/6) {
+                [r, g, b] = [x, c, 0];
+            } else if (h < 3/6) {
+                [r, g, b] = [0, c, x];
+            } else if (h < 4/6) {
+                [r, g, b] = [0, x, c];
+            } else if (h < 5/6) {
+                [r, g, b] = [x, 0, c];
+            } else {
+                [r, g, b] = [c, 0, x];
+            }
+            
+            return [r + m, g + m, b + m];
+        }
+
+        // Color schemes
+        function getColor(angle1, angle2, scheme) {
+            const hue = (angle1 + angle2) / (4 * Math.PI);
+            
+            switch(scheme) {
+                case 'rainbow':
+                    return hsvToRgb(hue, 0.8, 0.9);
+                case 'sunset':
+                    return hsvToRgb(hue * 0.3, 0.8, 0.9); // Orange-red range
+                case 'ocean':
+                    return hsvToRgb(0.5 + hue * 0.3, 0.8, 0.9); // Blue-green range
+                case 'forest':
+                    return hsvToRgb(0.3 + hue * 0.2, 0.8, 0.9); // Green range
+                case 'galaxy':
+                    return hsvToRgb(0.7 + hue * 0.3, 0.9, 0.8); // Purple-blue range
+                default:
+                    return hsvToRgb(hue, 0.8, 0.9);
+            }
+        }
+
+        // Generate donut (torus) 3D points
+        function generateDonut3DPoints(majorRadius, minorRadius, numMajor, numMinor, noiseLevel, colorScheme) {
+            const points = [];
+            const colors = [];
+            
+            // Surface points
+            for (let i = 0; i < numMajor; i++) {
+                const theta = 2 * Math.PI * i / numMajor;
+                for (let j = 0; j < numMinor; j++) {
+                    const phi = 2 * Math.PI * j / numMinor;
+                    
+                    // Torus parametric equations
+                    let x = (majorRadius + minorRadius * Math.cos(phi)) * Math.cos(theta);
+                    let y = (majorRadius + minorRadius * Math.cos(phi)) * Math.sin(theta);
+                    let z = minorRadius * Math.sin(phi);
+                    
+                    // Add noise
+                    x += (Math.random() - 0.5) * noiseLevel;
+                    y += (Math.random() - 0.5) * noiseLevel;
+                    z += (Math.random() - 0.5) * noiseLevel;
+                    
+                    points.push([x, y, z]);
+                    
+                    // Color based on angles
+                    const color = getColor(theta, phi, colorScheme);
+                    colors.push(`rgb(${Math.floor(color[0]*255)}, ${Math.floor(color[1]*255)}, ${Math.floor(color[2]*255)})`);
+                }
+            }
+            
+            // Add some internal volume points for depth
+            const numInternal = Math.floor(points.length / 4);
+            for (let k = 0; k < numInternal; k++) {
+                const theta = Math.random() * 2 * Math.PI;
+                const phi = Math.random() * 2 * Math.PI;
+                const rMajor = majorRadius * (0.6 + Math.random() * 0.3);
+                const rMinor = minorRadius * (0.3 + Math.random() * 0.4);
+                
+                const x = (rMajor + rMinor * Math.cos(phi)) * Math.cos(theta);
+                const y = (rMajor + rMinor * Math.cos(phi)) * Math.sin(theta);
+                const z = rMinor * Math.sin(phi);
+                
+                points.push([x, y, z]);
+                
+                const color = getColor(theta, phi, colorScheme);
+                // Make internal points slightly dimmer
+                const dimmedColor = color.map(c => c * 0.7);
+                colors.push(`rgb(${Math.floor(dimmedColor[0]*255)}, ${Math.floor(dimmedColor[1]*255)}, ${Math.floor(dimmedColor[2]*255)})`);
+            }
+            
+            return { points, colors };
+        }
+
+        // Update display values
+        function updateDisplayValues() {
+            document.getElementById('majorRadiusValue').textContent = document.getElementById('majorRadius').value;
+            document.getElementById('minorRadiusValue').textContent = document.getElementById('minorRadius').value;
+            document.getElementById('noiseLevelValue').textContent = document.getElementById('noiseLevel').value;
+            document.getElementById('pointSizeValue').textContent = document.getElementById('pointSize').value;
+        }
+
+        // Generate and plot donut
+        function generateDonut() {
+            const startTime = performance.now();
+            
+            const majorRadius = parseFloat(document.getElementById('majorRadius').value);
+            const minorRadius = parseFloat(document.getElementById('minorRadius').value);
+            const [numMajor, numMinor] = document.getElementById('resolution').value.split(',').map(Number);
+            const noiseLevel = parseFloat(document.getElementById('noiseLevel').value);
+            const pointSize = parseFloat(document.getElementById('pointSize').value);
+            const colorScheme = document.getElementById('colorScheme').value;
+            
+            // Generate data
+            donutData = generateDonut3DPoints(majorRadius, minorRadius, numMajor, numMinor, noiseLevel, colorScheme);
+            
+            // Prepare data for plotting
+            const x = donutData.points.map(p => p[0]);
+            const y = donutData.points.map(p => p[1]);
+            const z = donutData.points.map(p => p[2]);
+            
+            const data = [{
+                x: x,
+                y: y,
+                z: z,
+                mode: 'markers',
+                marker: {
+                    size: pointSize,
+                    color: donutData.colors,
+                    opacity: 0.8,
+                    line: {
+                        width: 0
+                    }
+                },
+                type: 'scatter3d',
+                name: 'Donut Points'
+            }];
+            
+            const layout = {
+                title: {
+                    text: '3D Gaussian Splatting Donut',
+                    font: { size: 20, color: 'white' }
+                },
+                scene: {
+                    xaxis: { 
+                        title: 'X',
+                        gridcolor: 'rgba(255,255,255,0.2)',
+                        backgroundcolor: 'rgba(0,0,0,0)',
+                        color: 'white'
+                    },
+                    yaxis: { 
+                        title: 'Y',
+                        gridcolor: 'rgba(255,255,255,0.2)',
+                        backgroundcolor: 'rgba(0,0,0,0)',
+                        color: 'white'
+                    },
+                    zaxis: { 
+                        title: 'Z',
+                        gridcolor: 'rgba(255,255,255,0.2)',
+                        backgroundcolor: 'rgba(0,0,0,0)',
+                        color: 'white'
+                    },
+                    bgcolor: 'rgba(0,0,0,0.1)',
+                    camera: {
+                        eye: { x: 1.5, y: 1.5, z: 1.5 },
+                        center: { x: 0, y: 0, z: 0 }
+                    },
+                    aspectmode: 'cube'
+                },
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                plot_bgcolor: 'rgba(0,0,0,0)',
+                font: { color: 'white' },
+                margin: { l: 0, r: 0, t: 40, b: 0 }
+            };
+            
+            const config = {
+                displayModeBar: true,
+                displaylogo: false,
+                modeBarButtonsToRemove: ['pan2d', 'lasso2d'],
+                responsive: true
+            };
+            
+            Plotly.newPlot('donutPlot', data, layout, config);
+            
+            // Update stats
+            const endTime = performance.now();
+            document.getElementById('pointCount').textContent = `Points: ${donutData.points.length}`;
+            document.getElementById('renderTime').textContent = `Render Time: ${Math.round(endTime - startTime)}ms`;
+        }
+
+        // Animate rotation
+        function animateRotation() {
+            if (animationId) {
+                clearInterval(animationId);
+                animationId = null;
+                return;
+            }
+            
+            animationId = setInterval(() => {
+                currentAngle += 5;
+                const radians = currentAngle * Math.PI / 180;
+                
+                const eye = {
+                    x: 3 * Math.cos(radians),
+                    y: 3 * Math.sin(radians),
+                    z: 2
+                };
+                
+                Plotly.relayout('donutPlot', {
+                    'scene.camera.eye': eye
+                });
+            }, 100);
+        }
+
+        // Randomize parameters
+        function randomizeParameters() {
+            document.getElementById('majorRadius').value = (1 + Math.random() * 3).toFixed(1);
+            document.getElementById('minorRadius').value = (0.3 + Math.random() * 1.2).toFixed(1);
+            document.getElementById('noiseLevel').value = (Math.random() * 0.15).toFixed(2);
+            document.getElementById('pointSize').value = (2 + Math.random() * 6).toFixed(1);
+            
+            const schemes = ['rainbow', 'sunset', 'ocean', 'forest', 'galaxy'];
+            document.getElementById('colorScheme').value = schemes[Math.floor(Math.random() * schemes.length)];
+            
+            updateDisplayValues();
+            generateDonut();
+        }
+
+        // Event listeners
+        document.getElementById('majorRadius').addEventListener('input', updateDisplayValues);
+        document.getElementById('minorRadius').addEventListener('input', updateDisplayValues);
+        document.getElementById('noiseLevel').addEventListener('input', updateDisplayValues);
+        document.getElementById('pointSize').addEventListener('input', updateDisplayValues);
+
+        // Auto-regenerate on parameter change
+        document.addEventListener('change', (e) => {
+            if (e.target.type === 'range' || e.target.tagName === 'SELECT') {
+                generateDonut();
+            }
+        });
+
+        // Initialize
+        updateDisplayValues();
+        generateDonut();
+    </script>
+</body>
+</html>
