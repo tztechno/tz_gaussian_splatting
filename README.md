@@ -1,5 +1,6 @@
 # tz_gaussian_splatting
 
+---
 
 ### about dounut.html
 
