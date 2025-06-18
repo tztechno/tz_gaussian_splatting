@@ -1,7 +1,9 @@
 # tz_gaussian_splatting
 
 
-Yes, 3D Gaussian Splatting is a cutting-edge technology that is actually being used in animation production! The interactive example I created shows the basic concept of this technology, but it is used in a more advanced form in real-world animation production.
+## about dounut.html
+
+3D Gaussian Splatting is a cutting-edge technology that is actually being used in animation production! The interactive example I created shows the basic concept of this technology, but it is used in a more advanced form in real-world animation production.
 
 Real-world applications in animation:
 
