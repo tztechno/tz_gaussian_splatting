@@ -1,5 +1,9 @@
 # tz_gaussian_splatting
 
+### oofi1k-drone-video-gaussian-splatting.ipynb
+
+no improvement by fittig, no use
+
 ---
 
 ### about dounut.html
