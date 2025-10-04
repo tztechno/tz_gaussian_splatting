@@ -290,7 +290,9 @@ const GaussianSplattingViewer = () => {
     gl.clearColor(0.1, 0.1, 0.15, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    if (gaussians.length === 0) {
+    const vertexCount = window.gaussianCount || gaussians.length;
+    
+    if (vertexCount === 0) {
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.fillStyle = 'white';
@@ -329,7 +331,7 @@ const GaussianSplattingViewer = () => {
     gl.enableVertexAttribArray(aSize);
     gl.vertexAttribPointer(aSize, 1, gl.FLOAT, false, 0, 0);
 
-    gl.drawArrays(gl.POINTS, 0, gaussians.length);
+    gl.drawArrays(gl.POINTS, 0, vertexCount);
   };
 
   const handlePLYUpload = (e) => {
@@ -478,7 +480,7 @@ const GaussianSplattingViewer = () => {
             <p>▶️ 再生中</p>
           )}
           <div className="mt-2 pt-2 border-t border-gray-600">
-            <p>ガウシアン数: {gaussians.length.toLocaleString()}</p>
+            <p>ガウシアン数: {(window.gaussianCount || gaussians.length).toLocaleString()}</p>
             <p>FPS: {fps}</p>
             {cameras.length > 0 && <p>カメラ: {cameras.length}</p>}
             {loading && <p className="text-yellow-400 animate-pulse">読み込み中...</p>}
