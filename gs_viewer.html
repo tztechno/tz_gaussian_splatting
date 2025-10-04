@@ -1,732 +1,478 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gaussian Splatting WebGL Viewer</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+import React, { useEffect, useRef, useState } from 'react';
+import { Upload, Play, Pause, RotateCcw, Camera } from 'lucide-react';
+
+const GaussianSplattingViewer = () => {
+  const canvasRef = useRef(null);
+  const glRef = useRef(null);
+  const [gaussians, setGaussians] = useState([]);
+  const [cameras, setCameras] = useState([]);
+  const [currentFrame, setCurrentFrame] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [useManualControl, setUseManualControl] = useState(true);
+  const [fps, setFps] = useState(0);
+  const [rotation, setRotation] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(5);
+  const [isDragging, setIsDragging] = useState(false);
+  const [lastMouse, setLastMouse] = useState({ x: 0, y: 0 });
+  const [loading, setLoading] = useState(false);
+  
+  const programRef = useRef(null);
+  const buffersRef = useRef({ vertex: null, color: null, size: null });
+  const animationRef = useRef(null);
+  const lastFrameTimeRef = useRef(0);
+
+  useEffect(() => {
+    initWebGL();
+    animate(0);
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isPlaying && cameras.length > 0) {
+      const interval = setInterval(() => {
+        setCurrentFrame(prev => (prev + 1) % cameras.length);
+      }, 1000 / 30);
+      return () => clearInterval(interval);
+    }
+  }, [isPlaying, cameras.length]);
+
+  const initWebGL = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const gl = canvas.getContext('webgl2', {
+      antialias: true,
+      alpha: false,
+      depth: true
+    });
+
+    if (!gl) {
+      alert('WebGL2がサポートされていません');
+      return;
+    }
+
+    glRef.current = gl;
+
+    const vertexShader = `#version 300 es
+      precision highp float;
+      in vec3 aPosition;
+      in vec3 aColor;
+      in float aSize;
+      uniform mat4 uProjection;
+      uniform mat4 uView;
+      uniform float uZoom;
+      out vec3 vColor;
+      void main() {
+        vec4 viewPos = uView * vec4(aPosition, 1.0);
+        gl_Position = uProjection * viewPos;
+        float perspSize = aSize * uZoom / (1.0 + max(0.0, -viewPos.z) * 0.1);
+        gl_PointSize = max(1.0, perspSize);
+        vColor = aColor;
+      }
+    `;
+
+    const fragmentShader = `#version 300 es
+      precision highp float;
+      in vec3 vColor;
+      out vec4 fragColor;
+      void main() {
+        vec2 coord = gl_PointCoord - vec2(0.5);
+        float dist = length(coord);
+        float alpha = exp(-dist * dist * 4.0);
+        if (alpha < 0.01) discard;
+        vec3 brightColor = vColor * 1.5;
+        fragColor = vec4(brightColor, alpha * 0.8);
+      }
+    `;
+
+    const vShader = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vShader, vertexShader);
+    gl.compileShader(vShader);
+
+    const fShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fShader, fragmentShader);
+    gl.compileShader(fShader);
+
+    const program = gl.createProgram();
+    gl.attachShader(program, vShader);
+    gl.attachShader(program, fShader);
+    gl.linkProgram(program);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error('Program link error:', gl.getProgramInfoLog(program));
+      return;
+    }
+
+    programRef.current = program;
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+
+    buffersRef.current = {
+      vertex: gl.createBuffer(),
+      color: gl.createBuffer(),
+      size: gl.createBuffer()
+    };
+  };
+
+  const parsePLY = async (text) => {
+    setLoading(true);
+    const lines = text.split('\n');
+    let vertexCount = 0;
+    let headerEnd = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (line.includes('element vertex')) {
+        vertexCount = parseInt(line.split(/\s+/)[2]);
+      }
+      if (line === 'end_header') {
+        headerEnd = i + 1;
+        break;
+      }
+    }
+
+    const newGaussians = [];
+    for (let i = headerEnd; i < lines.length && newGaussians.length < vertexCount; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      const parts = line.split(/\s+/);
+      if (parts.length >= 3) {
+        const x = parseFloat(parts[0]);
+        const y = parseFloat(parts[1]);
+        const z = parseFloat(parts[2]);
+        const r = parts.length >= 6 ? parseInt(parts[3]) : 128;
+        const g = parts.length >= 6 ? parseInt(parts[4]) : 128;
+        const b = parts.length >= 6 ? parseInt(parts[5]) : 128;
+
+        if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+          newGaussians.push({
+            position: [x, y, z],
+            color: [r / 255, g / 255, b / 255],
+            size: 8.0
+          });
         }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #0a0a0a;
-            color: #fff;
-            overflow: hidden;
-        }
-        #container {
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-        }
-        header {
-            background: #1a1a1a;
-            border-bottom: 1px solid #333;
-            padding: 1rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-        }
-        .controls {
-            display: flex;
-            gap: 0.5rem;
-        }
-        button, .file-btn {
-            padding: 0.5rem 1rem;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.9rem;
-            transition: background 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        .btn-primary {
-            background: #2563eb;
-            color: white;
-        }
-        .btn-primary:hover {
-            background: #1d4ed8;
-        }
-        .btn-secondary {
-            background: #059669;
-            color: white;
-        }
-        .btn-secondary:hover {
-            background: #047857;
-        }
-        .btn-gray {
-            background: #4b5563;
-            color: white;
-        }
-        .btn-gray:hover {
-            background: #374151;
-        }
-        .file-btn {
-            position: relative;
-            overflow: hidden;
-        }
-        .file-btn input {
-            position: absolute;
-            opacity: 0;
-            cursor: pointer;
-            width: 100%;
-            height: 100%;
-            left: 0;
-            top: 0;
-        }
-        #canvas-container {
-            flex: 1;
-            position: relative;
-            overflow: hidden;
-        }
-        canvas {
-            display: block;
-            width: 100%;
-            height: 100%;
-            cursor: grab;
-        }
-        canvas:active {
-            cursor: grabbing;
-        }
-        .info-panel {
-            position: absolute;
-            top: 1rem;
-            left: 1rem;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 1rem;
-            border-radius: 8px;
-            font-size: 0.85rem;
-            backdrop-filter: blur(10px);
-            max-width: 250px;
-        }
-        .info-panel h3 {
-            margin-bottom: 0.5rem;
-            font-size: 1rem;
-        }
-        .info-panel p {
-            margin: 0.25rem 0;
-            color: #aaa;
-        }
-        .playback-controls {
-            position: absolute;
-            bottom: 2rem;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0, 0, 0, 0.7);
-            padding: 1rem;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-            backdrop-filter: blur(10px);
-            min-width: 400px;
-        }
-        .playback-controls button {
-            padding: 0.5rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .playback-controls input[type="range"] {
-            flex: 1;
-            height: 4px;
-            background: #4b5563;
-            border-radius: 2px;
-            outline: none;
-        }
-        .mode-toggle {
-            position: absolute;
-            top: 1rem;
-            right: 1rem;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 0.5rem;
-            border-radius: 8px;
-            backdrop-filter: blur(10px);
-        }
-        .loading {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: rgba(0, 0, 0, 0.9);
-            padding: 2rem;
-            border-radius: 8px;
-            text-align: center;
-        }
-        .spinner {
-            border: 3px solid #333;
-            border-top: 3px solid #2563eb;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 1rem;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .hidden {
-            display: none;
-        }
-    </style>
-</head>
-<body>
-    <div id="container">
-        <header>
-            <h1>🎨 Gaussian Splatting WebGL Viewer</h1>
-            <div class="controls">
-                <label class="file-btn btn-primary">
-                    📁 PLYファイル
-                    <input type="file" id="plyInput" accept=".ply">
-                </label>
-                <label class="file-btn btn-secondary">
-                    🎥 カメラパス
-                    <input type="file" id="cameraInput" accept=".json">
-                </label>
-                <button class="btn-gray" id="resetBtn">🔄 リセット</button>
-            </div>
-        </header>
+      }
+    }
+
+    if (newGaussians.length > 0) {
+      const xs = newGaussians.map(g => g.position[0]);
+      const ys = newGaussians.map(g => g.position[1]);
+      const zs = newGaussians.map(g => g.position[2]);
+
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const minZ = Math.min(...zs), maxZ = Math.max(...zs);
+
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const centerZ = (minZ + maxZ) / 2;
+      const scale = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+
+      newGaussians.forEach(g => {
+        g.position[0] = (g.position[0] - centerX) / scale * 2;
+        g.position[1] = (g.position[1] - centerY) / scale * 2;
+        g.position[2] = (g.position[2] - centerZ) / scale * 2;
+      });
+
+      setGaussians(newGaussians);
+      updateBuffers(newGaussians);
+    }
+
+    setLoading(false);
+  };
+
+  const updateBuffers = (data) => {
+    const gl = glRef.current;
+    if (!gl || data.length === 0) return;
+
+    const positions = new Float32Array(data.length * 3);
+    const colors = new Float32Array(data.length * 3);
+    const sizes = new Float32Array(data.length);
+
+    for (let i = 0; i < data.length; i++) {
+      positions[i * 3] = data[i].position[0];
+      positions[i * 3 + 1] = data[i].position[1];
+      positions[i * 3 + 2] = data[i].position[2];
+      colors[i * 3] = data[i].color[0];
+      colors[i * 3 + 1] = data[i].color[1];
+      colors[i * 3 + 2] = data[i].color[2];
+      sizes[i] = data[i].size;
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffersRef.current.vertex);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffersRef.current.color);
+    gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffersRef.current.size);
+    gl.bufferData(gl.ARRAY_BUFFER, sizes, gl.STATIC_DRAW);
+  };
+
+  const createProjectionMatrix = (fov, aspect, near, far) => {
+    const f = 1.0 / Math.tan(fov / 2);
+    return new Float32Array([
+      f / aspect, 0, 0, 0,
+      0, f, 0, 0,
+      0, 0, (far + near) / (near - far), -1,
+      0, 0, (2 * far * near) / (near - far), 0
+    ]);
+  };
+
+  const createViewMatrix = () => {
+    if (!useManualControl && cameras.length > 0) {
+      const cam = cameras[currentFrame];
+      const R = cam.rotationMatrix;
+      const pos = cam.position;
+
+      return new Float32Array([
+        R[0][0], R[1][0], R[2][0], 0,
+        R[0][1], R[1][1], R[2][1], 0,
+        R[0][2], R[1][2], R[2][2], 0,
+        -(R[0][0] * pos[0] + R[1][0] * pos[1] + R[2][0] * pos[2]),
+        -(R[0][1] * pos[0] + R[1][1] * pos[1] + R[2][1] * pos[2]),
+        -(R[0][2] * pos[0] + R[1][2] * pos[1] + R[2][2] * pos[2]),
+        1
+      ]);
+    }
+
+    const cosX = Math.cos(rotation.x);
+    const sinX = Math.sin(rotation.x);
+    const cosY = Math.cos(rotation.y);
+    const sinY = Math.sin(rotation.y);
+
+    return new Float32Array([
+      cosY, sinX * sinY, -cosX * sinY, 0,
+      0, cosX, sinX, 0,
+      sinY, -sinX * cosY, cosX * cosY, 0,
+      0, 0, -zoom, 1
+    ]);
+  };
+
+  const animate = (time) => {
+    if (lastFrameTimeRef.current > 0) {
+      setFps(Math.round(1000 / (time - lastFrameTimeRef.current)));
+    }
+    lastFrameTimeRef.current = time;
+
+    render();
+    animationRef.current = requestAnimationFrame(animate);
+  };
+
+  const render = () => {
+    const canvas = canvasRef.current;
+    const gl = glRef.current;
+    if (!gl || !canvas) return;
+
+    if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+
+    gl.clearColor(0.04, 0.04, 0.04, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    if (gaussians.length === 0) return;
+
+    gl.useProgram(programRef.current);
+
+    const aspect = canvas.width / canvas.height;
+    const projection = createProjectionMatrix(Math.PI / 4, aspect, 0.1, 100);
+    const view = createViewMatrix();
+
+    const uProj = gl.getUniformLocation(programRef.current, 'uProjection');
+    const uView = gl.getUniformLocation(programRef.current, 'uView');
+    const uZoom = gl.getUniformLocation(programRef.current, 'uZoom');
+
+    gl.uniformMatrix4fv(uProj, false, projection);
+    gl.uniformMatrix4fv(uView, false, view);
+    gl.uniform1f(uZoom, zoom * 50);
+
+    const aPosition = gl.getAttribLocation(programRef.current, 'aPosition');
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffersRef.current.vertex);
+    gl.enableVertexAttribArray(aPosition);
+    gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+
+    const aColor = gl.getAttribLocation(programRef.current, 'aColor');
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffersRef.current.color);
+    gl.enableVertexAttribArray(aColor);
+    gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
+
+    const aSize = gl.getAttribLocation(programRef.current, 'aSize');
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffersRef.current.size);
+    gl.enableVertexAttribArray(aSize);
+    gl.vertexAttribPointer(aSize, 1, gl.FLOAT, false, 0, 0);
+
+    gl.drawArrays(gl.POINTS, 0, gaussians.length);
+  };
+
+  const handlePLYUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => parsePLY(ev.target.result);
+    reader.readAsText(file);
+  };
+
+  const handleCameraUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        let cameraArray = Array.isArray(data) ? data : data.cameras || [];
         
-        <div id="canvas-container">
-            <canvas id="glCanvas"></canvas>
-            
-            <div class="info-panel">
-                <h3 id="modeTitle">マニュアルモード</h3>
-                <p>🖱️ ドラッグ: 回転</p>
-                <p>🔄 ホイール: ズーム</p>
-                <div style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #333;">
-                    <p>ガウシアン数: <span id="pointCount">0</span></p>
-                    <p>FPS: <span id="fps">0</span></p>
-                    <p id="cameraInfo" class="hidden">カメラ: <span id="cameraCount">0</span></p>
-                </div>
-            </div>
-            
-            <div class="mode-toggle hidden" id="modeToggle">
-                <button class="btn-gray" id="toggleModeBtn">🎥 カメラパスモード</button>
-            </div>
-            
-            <div class="playback-controls hidden" id="playbackControls">
-                <button class="btn-primary" id="playBtn">▶️</button>
-                <input type="range" id="frameSlider" min="0" max="100" value="0">
-                <span id="frameInfo">0 / 0</span>
-            </div>
-            
-            <div class="loading hidden" id="loading">
-                <div class="spinner"></div>
-                <p>読み込み中...</p>
-            </div>
+        const newCameras = cameraArray.map(cam => ({
+          position: cam.position || [0, 0, 5],
+          rotationMatrix: cam.rotation || [[1,0,0],[0,1,0],[0,0,1]]
+        }));
+
+        setCameras(newCameras);
+        setUseManualControl(false);
+        alert(`${newCameras.length}個のカメラを読み込みました！`);
+      } catch (err) {
+        alert('カメラJSON読み込みエラー: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleMouseDown = (e) => {
+    if (!useManualControl) return;
+    setIsDragging(true);
+    setLastMouse({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMouseMove = (e) => {
+    if (!isDragging || !useManualControl) return;
+    const dx = e.clientX - lastMouse.x;
+    const dy = e.clientY - lastMouse.y;
+    setRotation(prev => ({
+      x: prev.x + dy * 0.01,
+      y: prev.y + dx * 0.01
+    }));
+    setLastMouse({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleWheel = (e) => {
+    if (!useManualControl) return;
+    e.preventDefault();
+    setZoom(prev => Math.max(1, Math.min(15, prev - e.deltaY * 0.01)));
+  };
+
+  return (
+    <div className="w-full h-screen bg-gray-900 flex flex-col">
+      <header className="bg-gray-800 border-b border-gray-700 p-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-white">🎨 Gaussian Splatting Viewer</h1>
+          <div className="flex gap-2">
+            <label className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded cursor-pointer flex items-center gap-2 transition-colors">
+              <Upload size={18} />
+              <span>PLY</span>
+              <input type="file" accept=".ply" onChange={handlePLYUpload} className="hidden" />
+            </label>
+            <label className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded cursor-pointer flex items-center gap-2 transition-colors">
+              <Camera size={18} />
+              <span>カメラ</span>
+              <input type="file" accept=".json" onChange={handleCameraUpload} className="hidden" />
+            </label>
+            <button
+              onClick={() => {
+                setRotation({ x: 0, y: 0 });
+                setZoom(5);
+                setCurrentFrame(0);
+              }}
+              className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded flex items-center gap-2"
+            >
+              <RotateCcw size={18} />
+            </button>
+          </div>
         </div>
+      </header>
+
+      <div className="flex-1 relative">
+        <canvas
+          ref={canvasRef}
+          className={`w-full h-full ${useManualControl ? 'cursor-grab active:cursor-grabbing' : ''}`}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={() => setIsDragging(false)}
+          onMouseLeave={() => setIsDragging(false)}
+          onWheel={handleWheel}
+        />
+
+        <div className="absolute top-4 left-4 bg-black bg-opacity-70 text-white p-4 rounded-lg text-sm backdrop-blur">
+          <h3 className="font-semibold mb-2">{useManualControl ? 'マニュアルモード' : 'カメラパスモード'}</h3>
+          {useManualControl ? (
+            <>
+              <p>🖱️ ドラッグ: 回転</p>
+              <p>🔄 ホイール: ズーム</p>
+            </>
+          ) : (
+            <p>▶️ 再生中</p>
+          )}
+          <div className="mt-2 pt-2 border-t border-gray-600">
+            <p>ガウシアン数: {gaussians.length.toLocaleString()}</p>
+            <p>FPS: {fps}</p>
+            {cameras.length > 0 && <p>カメラ: {cameras.length}</p>}
+          </div>
+        </div>
+
+        {cameras.length > 0 && (
+          <div className="absolute top-4 right-4 bg-black bg-opacity-70 p-2 rounded-lg">
+            <button
+              onClick={() => setUseManualControl(!useManualControl)}
+              className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm"
+            >
+              {useManualControl ? '🎥 カメラパス' : '🖱️ マニュアル'}
+            </button>
+          </div>
+        )}
+
+        {!useManualControl && cameras.length > 0 && (
+          <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-black bg-opacity-70 p-4 rounded-lg flex items-center gap-4 min-w-96">
+            <button
+              onClick={() => setIsPlaying(!isPlaying)}
+              className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded"
+            >
+              {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+            </button>
+            <input
+              type="range"
+              min="0"
+              max={cameras.length - 1}
+              value={currentFrame}
+              onChange={(e) => {
+                setCurrentFrame(parseInt(e.target.value));
+                setIsPlaying(false);
+              }}
+              className="flex-1"
+            />
+            <span className="text-white text-sm whitespace-nowrap">
+              {currentFrame + 1} / {cameras.length}
+            </span>
+          </div>
+        )}
+
+        {loading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-80">
+            <div className="text-white text-center">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
+              <p>読み込み中...</p>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
+  );
+};
 
-    <script>
-        const canvas = document.getElementById('glCanvas');
-        const gl = canvas.getContext('webgl2', { 
-            antialias: true,
-            alpha: false,
-            depth: true,
-            premultipliedAlpha: false
-        });
-
-        if (!gl) {
-            alert('WebGL2がサポートされていません');
-        }
-
-        let gaussians = [];
-        let cameras = [];
-        let currentCameraIndex = 0;
-        let isPlaying = false;
-        let useManualControl = true;
-        let lastFrameTime = 0;
-        let fps = 0;
-
-        let rotation = { x: 0, y: 0 };
-        let zoom = 5;
-        let isDragging = false;
-        let lastMouse = { x: 0, y: 0 };
-
-        let shaderProgram;
-        let vertexBuffer;
-        let colorBuffer;
-        let sizeBuffer;
-
-        const vertexShaderSource = '#version 300 es\n' +
-            'precision highp float;\n' +
-            'in vec3 aPosition;\n' +
-            'in vec3 aColor;\n' +
-            'in float aSize;\n' +
-            'uniform mat4 uProjectionMatrix;\n' +
-            'uniform mat4 uViewMatrix;\n' +
-            'uniform float uZoom;\n' +
-            'out vec3 vColor;\n' +
-            'out float vSize;\n' +
-            'void main() {\n' +
-            '    vec4 viewPos = uViewMatrix * vec4(aPosition, 1.0);\n' +
-            '    gl_Position = uProjectionMatrix * viewPos;\n' +
-            '    float perspectiveSize = aSize * uZoom / (1.0 + max(0.0, -viewPos.z) * 0.1);\n' +
-            '    gl_PointSize = max(1.0, perspectiveSize);\n' +
-            '    vColor = aColor;\n' +
-            '    vSize = perspectiveSize;\n' +
-            '}\n';
-
-        const fragmentShaderSource = '#version 300 es\n' +
-            'precision highp float;\n' +
-            'in vec3 vColor;\n' +
-            'in float vSize;\n' +
-            'out vec4 fragColor;\n' +
-            'void main() {\n' +
-            '    vec2 coord = gl_PointCoord - vec2(0.5);\n' +
-            '    float dist = length(coord);\n' +
-            '    float alpha = exp(-dist * dist * 4.0);\n' +
-            '    if (alpha < 0.01) discard;\n' +
-            '    vec3 brightColor = vColor * 1.5;\n' +
-            '    fragColor = vec4(brightColor, alpha * 0.8);\n' +
-            '}\n';
-
-        function initWebGL() {
-            const vertexShader = createShader(gl.VERTEX_SHADER, vertexShaderSource);
-            const fragmentShader = createShader(gl.FRAGMENT_SHADER, fragmentShaderSource);
-            
-            shaderProgram = gl.createProgram();
-            gl.attachShader(shaderProgram, vertexShader);
-            gl.attachShader(shaderProgram, fragmentShader);
-            gl.linkProgram(shaderProgram);
-            
-            if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
-                console.error('Shader program failed to link:', gl.getProgramInfoLog(shaderProgram));
-                return;
-            }
-            
-            gl.enable(gl.BLEND);
-            gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-            gl.enable(gl.DEPTH_TEST);
-            gl.depthMask(false);
-            
-            vertexBuffer = gl.createBuffer();
-            colorBuffer = gl.createBuffer();
-            sizeBuffer = gl.createBuffer();
-        }
-
-        function createShader(type, source) {
-            const shader = gl.createShader(type);
-            gl.shaderSource(shader, source);
-            gl.compileShader(shader);
-            
-            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-                console.error('Shader compilation error:', gl.getShaderInfoLog(shader));
-                gl.deleteShader(shader);
-                return null;
-            }
-            
-            return shader;
-        }
-
-        async function parsePLY(text) {
-            showLoading(true);
-            
-            const lines = text.split('\n');
-            let vertexCount = 0;
-            let headerEnd = 0;
-            
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].trim();
-                if (line.includes('element vertex')) {
-                    vertexCount = parseInt(line.split(/\s+/)[2]);
-                }
-                if (line === 'end_header') {
-                    headerEnd = i + 1;
-                    break;
-                }
-            }
-            
-            console.log('Parsing ' + vertexCount + ' gaussians...');
-            
-            gaussians = [];
-            
-            for (let i = headerEnd; i < lines.length && gaussians.length < vertexCount; i++) {
-                const line = lines[i].trim();
-                if (!line) continue;
-                
-                const parts = line.split(/\s+/);
-                if (parts.length >= 3) {
-                    const x = parseFloat(parts[0]);
-                    const y = parseFloat(parts[1]);
-                    const z = parseFloat(parts[2]);
-                    
-                    let r = 128;
-                    let g = 128;
-                    let b = 128;
-                    if (parts.length >= 6) {
-                        r = parseInt(parts[3]);
-                        g = parseInt(parts[4]);
-                        b = parseInt(parts[5]);
-                    }
-                    
-                    if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
-                        gaussians.push({
-                            position: [x, y, z],
-                            color: [r / 255, g / 255, b / 255],
-                            size: 8.0
-                        });
-                    }
-                }
-            }
-            
-            if (gaussians.length > 0) {
-                const positions = gaussians.map(function(g) { return g.position; });
-                const xs = positions.map(function(p) { return p[0]; });
-                const ys = positions.map(function(p) { return p[1]; });
-                const zs = positions.map(function(p) { return p[2]; });
-                
-                const minX = Math.min.apply(null, xs);
-                const maxX = Math.max.apply(null, xs);
-                const minY = Math.min.apply(null, ys);
-                const maxY = Math.max.apply(null, ys);
-                const minZ = Math.min.apply(null, zs);
-                const maxZ = Math.max.apply(null, zs);
-                
-                const centerX = (minX + maxX) / 2;
-                const centerY = (minY + maxY) / 2;
-                const centerZ = (minZ + maxZ) / 2;
-                const scale = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
-                
-                gaussians.forEach(function(g) {
-                    g.position[0] = (g.position[0] - centerX) / scale * 2;
-                    g.position[1] = (g.position[1] - centerY) / scale * 2;
-                    g.position[2] = (g.position[2] - centerZ) / scale * 2;
-                });
-            }
-            
-            updateBuffers();
-            document.getElementById('pointCount').textContent = gaussians.length.toLocaleString();
-            
-            showLoading(false);
-            console.log('Loaded ' + gaussians.length + ' gaussians');
-        }
-
-        function updateBuffers() {
-            if (gaussians.length === 0) return;
-            
-            const positions = new Float32Array(gaussians.length * 3);
-            const colors = new Float32Array(gaussians.length * 3);
-            const sizes = new Float32Array(gaussians.length);
-            
-            for (let i = 0; i < gaussians.length; i++) {
-                positions[i * 3] = gaussians[i].position[0];
-                positions[i * 3 + 1] = gaussians[i].position[1];
-                positions[i * 3 + 2] = gaussians[i].position[2];
-                
-                colors[i * 3] = gaussians[i].color[0];
-                colors[i * 3 + 1] = gaussians[i].color[1];
-                colors[i * 3 + 2] = gaussians[i].color[2];
-                
-                sizes[i] = gaussians[i].size;
-            }
-            
-            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-            
-            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, colors, gl.STATIC_DRAW);
-            
-            gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, sizes, gl.STATIC_DRAW);
-        }
-
-        function createProjectionMatrix(fov, aspect, near, far) {
-            const f = 1.0 / Math.tan(fov / 2);
-            return [
-                f / aspect, 0, 0, 0,
-                0, f, 0, 0,
-                0, 0, (far + near) / (near - far), -1,
-                0, 0, (2 * far * near) / (near - far), 0
-            ];
-        }
-
-        function createViewMatrix() {
-            const cam = getCamera();
-            
-            if (cam.rotationMatrix) {
-                const R = cam.rotationMatrix;
-                const pos = cam.position;
-                
-                return [
-                    R[0][0], R[1][0], R[2][0], 0,
-                    R[0][1], R[1][1], R[2][1], 0,
-                    R[0][2], R[1][2], R[2][2], 0,
-                    -(R[0][0] * pos[0] + R[1][0] * pos[1] + R[2][0] * pos[2]),
-                    -(R[0][1] * pos[0] + R[1][1] * pos[1] + R[2][1] * pos[2]),
-                    -(R[0][2] * pos[0] + R[1][2] * pos[1] + R[2][2] * pos[2]),
-                    1
-                ];
-            } else {
-                const mat = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-                
-                mat[12] = -cam.position[0];
-                mat[13] = -cam.position[1];
-                mat[14] = -cam.position[2];
-                
-                const cosX = Math.cos(cam.rotation[0]);
-                const sinX = Math.sin(cam.rotation[0]);
-                const cosY = Math.cos(cam.rotation[1]);
-                const sinY = Math.sin(cam.rotation[1]);
-                
-                const rotX = [
-                    1, 0, 0, 0,
-                    0, cosX, sinX, 0,
-                    0, -sinX, cosX, 0,
-                    0, 0, 0, 1
-                ];
-                
-                const rotY = [
-                    cosY, 0, -sinY, 0,
-                    0, 1, 0, 0,
-                    sinY, 0, cosY, 0,
-                    0, 0, 0, 1
-                ];
-                
-                return multiplyMatrices(rotX, multiplyMatrices(rotY, mat));
-            }
-        }
-
-        function multiplyMatrices(a, b) {
-            const result = new Array(16);
-            for (let i = 0; i < 4; i++) {
-                for (let j = 0; j < 4; j++) {
-                    result[i * 4 + j] = 0;
-                    for (let k = 0; k < 4; k++) {
-                        result[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
-                    }
-                }
-            }
-            return result;
-        }
-
-        function getCamera() {
-            if (!useManualControl && cameras.length > 0) {
-                const cam = cameras[currentCameraIndex];
-                return {
-                    position: cam.position,
-                    rotationMatrix: cam.rotationMatrix,
-                    rotation: null
-                };
-            }
-            return {
-                position: [0, 0, zoom],
-                rotation: [rotation.x, rotation.y],
-                rotationMatrix: null
-            };
-        }
-
-        function render(time) {
-            if (lastFrameTime > 0) {
-                fps = Math.round(1000 / (time - lastFrameTime));
-                document.getElementById('fps').textContent = fps;
-            }
-            lastFrameTime = time;
-            
-            if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-                canvas.width = canvas.clientWidth;
-                canvas.height = canvas.clientHeight;
-                gl.viewport(0, 0, canvas.width, canvas.height);
-            }
-            
-            gl.clearColor(0.04, 0.04, 0.04, 1.0);
-            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-            
-            if (gaussians.length === 0) {
-                requestAnimationFrame(render);
-                return;
-            }
-            
-            gl.useProgram(shaderProgram);
-            
-            const aspect = canvas.width / canvas.height;
-            const projectionMatrix = createProjectionMatrix(Math.PI / 4, aspect, 0.1, 100);
-            const viewMatrix = createViewMatrix();
-            
-            const uProjection = gl.getUniformLocation(shaderProgram, 'uProjectionMatrix');
-            const uView = gl.getUniformLocation(shaderProgram, 'uViewMatrix');
-            const uZoom = gl.getUniformLocation(shaderProgram, 'uZoom');
-            
-            gl.uniformMatrix4fv(uProjection, false, projectionMatrix);
-            gl.uniformMatrix4fv(uView, false, viewMatrix);
-            gl.uniform1f(uZoom, zoom * 50);
-            
-            const aPosition = gl.getAttribLocation(shaderProgram, 'aPosition');
-            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-            gl.enableVertexAttribArray(aPosition);
-            gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
-            
-            const aColor = gl.getAttribLocation(shaderProgram, 'aColor');
-            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
-            gl.enableVertexAttribArray(aColor);
-            gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 0, 0);
-            
-            const aSize = gl.getAttribLocation(shaderProgram, 'aSize');
-            gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuffer);
-            gl.enableVertexAttribArray(aSize);
-            gl.vertexAttribPointer(aSize, 1, gl.FLOAT, false, 0, 0);
-            
-            gl.drawArrays(gl.POINTS, 0, gaussians.length);
-            
-            requestAnimationFrame(render);
-        }
-
-        canvas.addEventListener('mousedown', function(e) {
-            if (!useManualControl) return;
-            isDragging = true;
-            lastMouse = { x: e.clientX, y: e.clientY };
-        });
-
-        canvas.addEventListener('mousemove', function(e) {
-            if (!isDragging || !useManualControl) return;
-            const dx = e.clientX - lastMouse.x;
-            const dy = e.clientY - lastMouse.y;
-            rotation.y += dx * 0.01;
-            rotation.x += dy * 0.01;
-            lastMouse = { x: e.clientX, y: e.clientY };
-        });
-
-        canvas.addEventListener('mouseup', function() {
-            isDragging = false;
-        });
-
-        canvas.addEventListener('mouseleave', function() {
-            isDragging = false;
-        });
-
-        canvas.addEventListener('wheel', function(e) {
-            if (!useManualControl) return;
-            e.preventDefault();
-            zoom = Math.max(1, Math.min(15, zoom - e.deltaY * 0.01));
-        });
-
-        document.getElementById('plyInput').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = function(ev) {
-                parsePLY(ev.target.result);
-            };
-            reader.readAsText(file);
-        });
-
-        document.getElementById('cameraInput').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = function(ev) {
-                try {
-                    const data = JSON.parse(ev.target.result);
-                    console.log('Loaded camera JSON:', data);
-                    
-                    let cameraArray = null;
-                    if (Array.isArray(data)) {
-                        cameraArray = data;
-                    } else if (data.cameras && Array.isArray(data.cameras)) {
-                        cameraArray = data.cameras;
-                    } else if (data.camera_list && Array.isArray(data.camera_list)) {
-                        cameraArray = data.camera_list;
-                    }
-                    
-                    if (!cameraArray || cameraArray.length === 0) {
-                        alert('カメラデータが見つかりません');
-                        return;
-                    }
-                    
-                    console.log('Found ' + cameraArray.length + ' cameras');
-                    
-                    cameras = cameraArray.map(function(cam) {
-                        let position = cam.position || cam.camera_center || [0, 0, 5];
-                        let rotationMatrix = null;
-                        
-                        if (cam.rotation && Array.isArray(cam.rotation) && Array.isArray(cam.rotation[0])) {
-                            rotationMatrix = cam.rotation;
-                        }
-                        
-                        return {
-                            position: Array.isArray(position) ? position : [0, 0, 5],
-                            rotationMatrix: rotationMatrix,
-                            fx: cam.fx || 1500,
-                            fy: cam.fy || 1500
-                        };
-                    });
-                    
-                    document.getElementById('cameraCount').textContent = cameras.length;
-                    document.getElementById('cameraInfo').classList.remove('hidden');
-                    document.getElementById('modeToggle').classList.remove('hidden');
-                    document.getElementById('playbackControls').classList.remove('hidden');
-                    document.getElementById('frameSlider').max = cameras.length - 1;
-                    
-                    useManualControl = false;
-                    document.getElementById('modeTitle').textContent = 'カメラパスモード';
-                    document.getElementById('toggleModeBtn').textContent = '🖱️ マニュアルモード';
-                    
-                    updatePlaybackUI();
-                    alert('✅ ' + cameras.length + '個のカメラを読み込みました！');
-                    
-                } catch (err) {
-                    alert('カメラJSONの読み込みエラー:\n' + err.message);
-                    console.error('Camera JSON parse error:', err);
-                }
-            };
-            reader.readAsText(file);
-        });
-
-        document.getElementById('resetBtn').addEventListener('click', function() {
-            rotation = { x: 0, y: 0 };
-            zoom = 5;
-            currentCameraIndex = 0;
-            isPlaying = false;
-            updatePlaybackUI();
-        });
-
-        document.getElementById('toggleModeBtn').addEventListener('click', function() {
-            useManualControl = !useManualControl;
-            document.getElementById('modeTitle').textContent = useManualControl ? 'マニュアルモード' : 'カメラパスモード';
-            document.getElementById('toggleModeBtn').textContent = useManualControl ? '🎥 カメラパスモード' : '🖱️ マニュアルモード';
-            document.getElementById('playbackControls').classList.toggle('hidden', useManualControl);
-        });
-
-        document.getElementById('playBtn').addEventListener('click', function() {
-            isPlaying = !isPlaying;
-            document.getElementById('playBtn').textContent = isPlaying ? '⏸️' : '▶️';
-        });
-
-        document.getElementById('frameSlider').addEventListener('input', function(e) {
-            currentCameraIndex = parseInt(e.target.value);
-            isPlaying = false;
-            updatePlaybackUI();
-        });
-
-        function updatePlaybackUI() {
-            document.getElementById('frameSlider').value = currentCameraIndex;
-            document.getElementById('frameInfo').textContent = (currentCameraIndex + 1) + ' / ' + cameras.length;
-            document.getElementById('playBtn').textContent = isPlaying ? '⏸️' : '▶️';
-        }
-
-        setInterval(function() {
-            if (isPlaying && cameras.length > 0) {
-                currentCameraIndex = (currentCameraIndex + 1) % cameras.length;
-                updatePlaybackUI();
-            }
-        }, 1000 / 30);
-
-        function showLoading(show) {
-            document.getElementById('loading').classList.toggle('hidden', !show);
-        }
-
-        initWebGL();
-        requestAnimationFrame(render);
-    </script>
-</body>
-</html>
+export default GaussianSplattingViewer;
