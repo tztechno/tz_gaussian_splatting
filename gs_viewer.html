@@ -137,6 +137,8 @@ const GaussianSplattingViewer = () => {
         break;
       }
     }
+    
+    console.log('PLY vertex count:', vertexCount);
 
     const newGaussians = [];
     for (let i = headerEnd; i < lines.length && newGaussians.length < vertexCount; i++) {
@@ -181,9 +183,18 @@ const GaussianSplattingViewer = () => {
         g.position[1] = (g.position[1] - centerY) / scale * 2;
         g.position[2] = (g.position[2] - centerZ) / scale * 2;
       });
+      
+      console.log('Normalized gaussians:', newGaussians.length);
+      console.log('Bounds:', { minX, maxX, minY, maxY, minZ, maxZ });
+      console.log('Center:', { centerX, centerY, centerZ });
+      console.log('Scale:', scale);
+      console.log('Sample gaussian:', newGaussians[0]);
 
       setGaussians(newGaussians);
       updateBuffers(newGaussians);
+      alert(`✅ ${newGaussians.length}個のガウシアンを読み込みました`);
+    } else {
+      alert('❌ ガウシアンデータが見つかりませんでした');
     }
 
     setLoading(false);
@@ -276,10 +287,18 @@ const GaussianSplattingViewer = () => {
       gl.viewport(0, 0, canvas.width, canvas.height);
     }
 
-    gl.clearColor(0.04, 0.04, 0.04, 1.0);
+    gl.clearColor(0.1, 0.1, 0.15, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    if (gaussians.length === 0) return;
+    if (gaussians.length === 0) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.fillStyle = 'white';
+        ctx.font = '16px sans-serif';
+        ctx.fillText('PLYファイルを読み込んでください', 50, 50);
+      }
+      return;
+    }
 
     gl.useProgram(programRef.current);
 
@@ -315,10 +334,13 @@ const GaussianSplattingViewer = () => {
 
   const handlePLYUpload = (e) => {
     const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => parsePLY(ev.target.result);
-    reader.readAsText(file);
+    if (!file) {
+      console.log('No file selected');
+      return;
+    }
+    
+    console.log('File selected:', file.name, 'Size:', (file.size / 1024 / 1024).toFixed(2) + 'MB');
+    parsePLY(file);
   };
 
   const handleCameraUpload = (e) => {
@@ -328,18 +350,27 @@ const GaussianSplattingViewer = () => {
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
+        console.log('Raw camera data:', data);
+        
         let cameraArray = Array.isArray(data) ? data : data.cameras || [];
+        console.log('Camera array length:', cameraArray.length);
+        console.log('First camera:', cameraArray[0]);
         
         const newCameras = cameraArray.map(cam => ({
           position: cam.position || [0, 0, 5],
           rotationMatrix: cam.rotation || [[1,0,0],[0,1,0],[0,0,1]]
         }));
+        
+        console.log('Processed cameras:', newCameras.length);
+        console.log('First processed camera:', newCameras[0]);
 
         setCameras(newCameras);
         setUseManualControl(false);
-        alert(`${newCameras.length}個のカメラを読み込みました！`);
+        setCurrentFrame(0);
+        alert(`✅ ${newCameras.length}個のカメラを読み込みました！\nカメラパスモードに切り替わりました。`);
       } catch (err) {
         alert('カメラJSON読み込みエラー: ' + err.message);
+        console.error('Camera load error:', err);
       }
     };
     reader.readAsText(file);
@@ -374,18 +405,45 @@ const GaussianSplattingViewer = () => {
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold text-white">🎨 Gaussian Splatting Viewer</h1>
           <div className="flex gap-2">
-            <label className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded cursor-pointer flex items-center gap-2 transition-colors">
-              <Upload size={18} />
-              <span>PLY</span>
-              <input type="file" accept=".ply" onChange={handlePLYUpload} className="hidden" />
-            </label>
-            <label className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded cursor-pointer flex items-center gap-2 transition-colors">
-              <Camera size={18} />
-              <span>カメラ</span>
-              <input type="file" accept=".json" onChange={handleCameraUpload} className="hidden" />
-            </label>
+            <input
+              type="file"
+              id="plyFileInput"
+              accept=".ply"
+              onChange={handlePLYUpload}
+              style={{ display: 'none' }}
+            />
             <button
               onClick={() => {
+                console.log('PLY button clicked');
+                document.getElementById('plyFileInput').click();
+              }}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded flex items-center gap-2 transition-colors"
+            >
+              <Upload size={18} />
+              <span>PLY</span>
+            </button>
+            
+            <input
+              type="file"
+              id="cameraFileInput"
+              accept=".json"
+              onChange={handleCameraUpload}
+              style={{ display: 'none' }}
+            />
+            <button
+              onClick={() => {
+                console.log('Camera button clicked');
+                document.getElementById('cameraFileInput').click();
+              }}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded flex items-center gap-2 transition-colors"
+            >
+              <Camera size={18} />
+              <span>カメラ</span>
+            </button>
+            
+            <button
+              onClick={() => {
+                console.log('Reset button clicked');
                 setRotation({ x: 0, y: 0 });
                 setZoom(5);
                 setCurrentFrame(0);
@@ -423,6 +481,7 @@ const GaussianSplattingViewer = () => {
             <p>ガウシアン数: {gaussians.length.toLocaleString()}</p>
             <p>FPS: {fps}</p>
             {cameras.length > 0 && <p>カメラ: {cameras.length}</p>}
+            {loading && <p className="text-yellow-400 animate-pulse">読み込み中...</p>}
           </div>
         </div>
 
